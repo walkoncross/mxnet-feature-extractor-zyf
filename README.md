@@ -13,6 +13,7 @@ A wrapper for extractring features from MXNet network, with a config file to def
 
 ## Python requirements:
 ```
+easydict
 mxnet
 numpy
 json

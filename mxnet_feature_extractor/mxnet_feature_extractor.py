@@ -391,7 +391,7 @@ class MxnetFeatureExtractor(object):
 
             if img_root_dir:
                 path = osp.join(img_root_dir, path)
-
+                print "image path===\n",path
             img = self.read_image(path)
             # if cnt == 0:
             # print'image shape: ', img.shape
