@@ -16,7 +16,7 @@ import time
 from easydict import EasyDict as edict
 
 import _init_paths
-#from compare_feats import calc_similarity_cosine
+# from compare_feats import calc_similarity_cosine
 
 
 try:
@@ -58,17 +58,21 @@ class MxnetFeatureExtractor(object):
         self.net = None
 #        self.net_blobs = None
         self.image_shape = None
+        self.input_batch_shape = None
         self.batch_size = None
         self.net_ctx = mx.cpu()
         self.mean_arr = None
         self.input_blob = None
+        self.all_layer_names = []
+        self.feature_layers = []
+        self.loaded_output_layers = []
 
         self.config = {
-            #"network_symbols": "/path/to/prototxt",
-            #"network_params": "/path/to/mxnetmodel",
-            #"data_mean": "/path/to/the/mean/file",
+            # "network_symbols": "/path/to/prototxt",
+            # "network_params": "/path/to/mxnetmodel",
+            # "data_mean": "/path/to/the/mean/file",
             "data_mean": "",
-            #"feature_layer": "fc5",
+            # "feature_layer": "fc5",
             "batch_size": 1,
             "input_width": 112,
             "input_height": 112,
@@ -159,8 +163,8 @@ class MxnetFeatureExtractor(object):
         else:
             final_batch_size = self.batch_size
 
-        data_shape = (final_batch_size, 3,
-                      self.config['input_height'], self.config['input_width'])
+        self.input_batch_shape = (final_batch_size, 3,
+                                  self.config['input_height'], self.config['input_width'])
 
         vec = self.config['network_model'].split(',')
         if len(vec) < 2:
@@ -176,21 +180,86 @@ class MxnetFeatureExtractor(object):
         net.ctx = self.net_ctx
         net.sym, net.arg_params, net.aux_params = mx.model.load_checkpoint(
             prefix, epoch)
+        # print('\n---> loaded symbols:', net.sym)
+        self.loaded_output_layers = net.sym.list_outputs()
+        # print('\n---> loaded output layers:', self.loaded_output_layers)
 
-        all_layers = net.sym.get_internals()
-        net.sym = all_layers[self.config['feature_layer']]
-        # print net.sym.get_internals()
-        net.model = mx.mod.Module(
-            symbol=net.sym, context=net.ctx, label_names=None)
-        net.model.bind(
-            data_shapes=[('data', data_shape)])
-        net.model.set_params(net.arg_params, net.aux_params)
+        net.model = None
+        net.all_layers = net.sym.get_internals()
 
+        self.all_layer_names = net.all_layers.list_outputs()
+        print('\n---> all_layer_names:', self.all_layer_names)
+        # print('\n---> net.sym[2].get_children():', net.sym[2].get_children())
+
+        self.feature_layers = self.get_feature_layers()
+        # print('\n---> feature_layers:', self.feature_layers)
+        self.input_blob = np.zeros(self.input_batch_shape, dtype=np.float32)
         self.net = net
-        self.input_blob = np.zeros(data_shape, dtype=np.float32)
+        self.setup_network()
+
+    def setup_network(self):
+        # net.sym = all_layers[self.config['feature_layer']]
+        output_symbols = []
+        for layer in self.feature_layers:
+            output_symbols.append(self.net.all_layers[layer])
+
+        self.net.sym = mx.symbol.Group(output_symbols)
+
+        # print net.sym.get_internals()
+        self.net.model = mx.mod.Module(
+            symbol=self.net.sym, context=self.net.ctx, label_names=None)
+        self.net.model.bind(
+            data_shapes=[('data', self.input_batch_shape)])
+        self.net.model.set_params(self.net.arg_params, self.net.aux_params)
+
+    def split_layer_names(self, layer_names):
+        if isinstance(layer_names, list):
+            return layer_names
+        elif isinstance(layer_names, str):
+            spl = layer_names.split(',')
+            layers = [layer.strip() for layer in spl]
+            return layers
+        else:
+            raise FeatureLayerError('layer_names must be '
+                                    'a list of layer names, or a string with '
+                                    'layer names seperated by comma.'
+                                    'Input layer_names is: {}'.format(
+                                        layer_names)
+                                    )
+
+    def get_feature_layers(self, layer_names=None):
+        if not layer_names:
+            layer_names = self.config['feature_layer']
+
+        if not layer_names:
+            return self.loaded_output_layers
+
+        layer_names = self.split_layer_names(layer_names)
+
+        for layer in layer_names:
+            # if not layer.endswith('_output'):
+            #     layer += '_output'
+
+            if (layer not in self.all_layer_names):
+                raise FeatureLayerError(
+                    'Invalid feature layer name:'.format(layer)
+                )
+
+        return layer_names
+
+    def get_first_layer_name(self):
+        return self.all_layer_names[0]
+
+    def get_final_layer_name(self):
+        return self.all_layer_names[-1]
 
     def get_batch_size(self):
         return self.batch_size
+
+    def set_feature_layers(self, layer_names):
+        layer_names = self.get_feature_layers(layer_names)
+        self.feature_layers = layer_names
+        self.setup_network()
 
     def read_image(self, img_path):
         if self.config["image_as_grey"]:
@@ -208,7 +277,6 @@ class MxnetFeatureExtractor(object):
     def preprocess(self, data):
         """
         Format input for network:
-        - convert to single
         - resize to input dimensions (preserving number of channels)
         - transpose dimensions to K x H x W
         - reorder channels (for instance color to BGR)
@@ -224,9 +292,15 @@ class MxnetFeatureExtractor(object):
         -------
         net_in : (K x H x W) ndarray for input to a Net
         """
-        net_in = data.astype(np.float32, copy=False)
+        net_in = data.astype(np.float32, copy=True)
         # print 'net_in.shape: ', net_in.shape
         # print 'net_in: ', net_in
+
+        if data.shape[0] != self.config["input_height"] or data.shape[1] != self.config["input_width"]:
+            in_shape = (self.config["input_height"],
+                        self.config["input_width"])
+            # net_in = np.zeros(in_shape, dtype=np.float32)
+            net_in = cv2.resize(net_in, in_shape)
 
         channel_swap = self.config.get('channel_swap', None)
         # raw_scale = self.config.get('raw_scale', None)
@@ -251,8 +325,8 @@ class MxnetFeatureExtractor(object):
         return net_in
 
     def load_image_to_data_buffer(self, img, load_idx=0):
-        if img.shape != self.image_shape:
-            raise LoadDataError('image shape must be : ', self.image_shape)
+        # if img.shape != self.image_shape:
+        #     raise LoadDataError('image shape must be : ', self.image_shape)
 
         if load_idx + 1 > self.batch_size:
             raise LoadDataError(
@@ -284,9 +358,12 @@ class MxnetFeatureExtractor(object):
         # print '---> self.input_blob[load_idx+batch_size]: ',
         # self.input_blob[load_idx+ self.batch_size]
 
-    def get_features(self, n_imgs=None):
+    def get_features(self, n_imgs=None, layer_names=None, mirror_input=False):
         if not n_imgs:
             n_imgs = self.batch_size
+
+        if layer_names is not None:
+            self.set_feature_layers(layer_names)
 
         data = mx.nd.array(self.input_blob)
         # print '---> data[0]: ', data[0]
@@ -296,62 +373,70 @@ class MxnetFeatureExtractor(object):
         # print '---> db.data[0]: ', db.data[0][0]
         # print '---> db.data[batch_size]: ', db.data[0][self.batch_size]
 
-        features = []
-
         self.net.model.forward(db, is_train=False)
-        outputs = self.net.model.get_outputs()[0]
+        # outputs = self.net.model.get_outputs()[0]
         # print('outputs.shape: ', outputs.shape)
         # print('outputs: ', outputs)
+        outputs_list = self.net.model.get_outputs()
+        print('len(outputs_list)=', len(outputs_list))
 
-        for j in range(n_imgs):
-            embedding = outputs[j].asnumpy().flatten()
-            # print '---> embedding.shape: ', embedding.shape
-            # print '---> embedding: ', embedding
+        features_dict = {}
 
-            if self.config['mirror_trick'] > 0:
-                embedding_flip = outputs[j +
-                                         self.batch_size].asnumpy().flatten()
-                # print '---> embedding_flip.shape: ', embedding_flip.shape
-                # print '---> embedding_flip: ', embedding_flip
+        for i, layer in enumerate(self.feature_layers):
+            features = []
+            feature_map = outputs_list[i]
 
-                # sim = calc_similarity_cosine(embedding, embedding_flip)
-                # print('---> flip_sim=%f\n' % sim)
+            for j in range(n_imgs):
+                embedding = feature_map[j].asnumpy()
+                # print '---> embedding.shape: ', embedding.shape
+                # print '---> embedding: ', embedding
 
-                if self.config['mirror_trick'] == 1:
-                    # print '---> elt_avg embedding and embedding_flip'
-                    embedding += embedding_flip
-                    embedding *= 0.5
-                elif self.config['mirror_trick'] == 2:
-                    # print '---> elt_max embedding and embedding_flip'
-                    embedding = np.maximum(embedding, embedding_flip)
-                else:
-                    # print '---> concat embedding and embedding_flip'
-                    embedding = np.concatenate([embedding, embedding_flip])
-            # print '---> after mirror_trick, embedding.shape: ', embedding.shape
-            # print '---> after mirror_trick, embedding: ', embedding
+                if self.config['mirror_trick'] > 0:
+                    embedding_flip = feature_map[j +
+                                                 self.batch_size].asnumpy()
+                    # print '---> embedding_flip.shape: ', embedding_flip.shape
+                    # print '---> embedding_flip: ', embedding_flip
 
-            if self.config['normalize_output'] > 0:
-                _norm = np.linalg.norm(embedding)
-                if _norm > 0:
-                    embedding /= _norm
+                    # sim = calc_similarity_cosine(embedding, embedding_flip)
+                    # print('---> flip_sim=%f\n' % sim)
 
-            # print '---> after norm, embedding.shape: ', embedding.shape
-            # print '---> after norm, embedding: ', embedding
+                    if self.config['mirror_trick'] == 1:
+                        # print '---> elt_avg embedding and embedding_flip'
+                        embedding += embedding_flip
+                        embedding *= 0.5
+                    elif self.config['mirror_trick'] == 2:
+                        # print '---> elt_max embedding and embedding_flip'
+                        embedding = np.maximum(embedding, embedding_flip)
+                    else:
+                        # print '---> concat embedding and embedding_flip'
+                        embedding = np.concatenate([embedding, embedding_flip])
+                # print '---> after mirror_trick, embedding.shape: ', embedding.shape
+                # print '---> after mirror_trick, embedding: ', embedding
 
-            features.append(embedding)
+                if self.config['normalize_output'] > 0:
+                    _norm = np.linalg.norm(embedding)
+                    if _norm > 0:
+                        embedding /= _norm
 
-        return features
+                # print '---> after norm, embedding.shape: ', embedding.shape
+                # print '---> after norm, embedding: ', embedding
 
-    def extract_feature(self, image):
+                features.append(embedding)
+
+            features_dict[layer] = np.array(features)
+
+        return features_dict
+
+    def extract_feature(self, image, layer_names=None, mirror_input=False):
         if isinstance(image, str):
             image = self.read_image(image)
 
         self.load_image_to_data_buffer(image)
-        feature = self.get_features(1)[0]
+        features_dict = self.get_features(1, layer_names, mirror_input)[0]
 
-        return feature
+        return features_dict
 
-    def extract_features_batch(self, images):
+    def extract_features_batch(self, images, layer_names=None, mirror_input=False):
         n_imgs = len(images)
 
         if (n_imgs > self.batch_size):
@@ -370,13 +455,13 @@ class MxnetFeatureExtractor(object):
 
         # t1 = time.clock()
 
-        features = self.get_features(n_imgs)
+        features_dict = self.get_features(n_imgs, layer_names, mirror_input)
 
         # t2 = time.clock()
         # time_predict += (t2 - t1)
         # cnt_predict += n_imgs
 
-        return features
+        return features_dict
 
     def extract_features_for_image_list(self, image_list, img_root_dir=None):
         # cnt_load_img = 0
@@ -384,7 +469,10 @@ class MxnetFeatureExtractor(object):
         # cnt_predict = 0
         # time_predict = 0.0
         img_batch = []
-        features = []
+        # features = []
+        features_dict = {}
+        for layer in self.feature_layers:
+            features_dict[layer] = []
 
         for cnt, path in enumerate(image_list):
             # t1 = time.clock()
@@ -405,14 +493,15 @@ class MxnetFeatureExtractor(object):
             # # print'image shape: ', img.shape
             # # printpath, type(img), img.mean()
             if (len(img_batch) == self.batch_size or cnt + 1 == len(image_list)):
-                _ftrs = self.extract_features_batch(img_batch)
-                features.extend(_ftrs)
+                _ftrs_dict = self.extract_features_batch(img_batch)
+                for layer in self.feature_layers:
+                    features_dict[layer].extend(_ftrs_dict[layer])
                 img_batch = []
 
         # print('Load %d images, cost %f seconds, average time: %f seconds' %
         #       (cnt_load_img, time_load_img, time_load_img / cnt_load_img))
         # print '---> len(features): ', len(features)
-        return features
+        return features_dict
 
 
 if __name__ == '__main__':
@@ -454,7 +543,10 @@ if __name__ == '__main__':
     print'\n===> test extract_features_for_image_list()'
     ftrs = feat_extractor.extract_features_for_image_list(img_list, image_dir)
 #    np.save(osp.join(save_dir, save_name), ftrs)
-    print '---> len(ftrs): ', len(ftrs)
+    print '---> feature layers: ', ftrs.keys()
+
+    ftrs_0 = ftrs.values()[0]
+    print '---> len(ftrs): ', len(ftrs_0)
 
     root_len = len(image_dir)
 
@@ -471,16 +563,22 @@ if __name__ == '__main__':
         else:
             save_sub_dir = save_dir
 
-        save_name = osp.splitext(base_name)[0] + '.npy'
-        np.save(osp.join(save_sub_dir, save_name), ftrs[i])
+        for k, _ftrs in ftrs.iteritems():
+            save_name = osp.splitext(base_name)[0] + '_%s.npy' % k
+            np.save(osp.join(save_sub_dir, save_name), _ftrs[i])
 
     # test extract_feature()
     print '\n===> test extract_feature()'
-    save_name_2 = 'single_feature.npy'
+    save_name_2 = 'single_feature'
 
     ftr = feat_extractor.extract_feature(osp.join(image_dir, img_list[0]))
     np.save(osp.join(save_dir, save_name_2), ftr)
+    for k, _ftrs in ftrs.iteritems():
+        save_name = 'single_feature_%s.npy' % k
+        np.save(osp.join(save_dir, save_name_2), _ftrs)
 
-    ft_diff = ftr - ftrs[0]
-    print '---> ftr', ftr
+    ftrs_0_1 = ftrs.values()[0]
+
+    ft_diff = ftr_0 - ftrs_0_1
+    print '---> ftr_0', ftr_0
     print '---> sum(ft_diff): ', ft_diff.sum()

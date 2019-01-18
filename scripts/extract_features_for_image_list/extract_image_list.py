@@ -6,9 +6,10 @@ import _init_paths
 from mxnet_feature_extractor import MxnetFeatureExtractor
 
 
-def process_image_list(feat_extractor, img_list, 
+def process_image_list(feat_extractor, img_list,
                         image_dir=None, save_dir=None):
     ftrs = feat_extractor.extract_features_for_image_list(img_list, image_dir)
+    feat_layers = ftrs.keys()
 #    np.save(osp.join(save_dir, save_name), ftrs)
 
     for i in range(len(img_list)):
@@ -22,8 +23,9 @@ def process_image_list(feat_extractor, img_list,
             if not osp.exists(save_sub_dir):
                 os.makedirs(save_sub_dir)
 
-        save_name = osp.splitext(base_name)[0] + '.npy'
-        np.save(osp.join(save_sub_dir, save_name), ftrs[i])
+        for layer in feat_layers:
+            save_name = osp.splitext(base_name)[0] + '_%s.npy' % layer
+            np.save(osp.join(save_sub_dir, save_name), ftrs[layer][i])
 
 
 def main(config_json, save_dir, image_list_file, image_dir):
