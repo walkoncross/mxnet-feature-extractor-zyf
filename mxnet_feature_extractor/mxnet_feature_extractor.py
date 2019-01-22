@@ -105,7 +105,8 @@ class MxnetFeatureExtractor(object):
         # _config['network_symbols'] = str(_config['network_symbols'])
         # _config['network_params'] = str(_config['network_params'])
         # _config['data_mean'] = str(_config['data_mean'])
-        _config['feature_layer'] = str(_config['feature_layer'])
+        if not isinstance(_config['feature_layer'], list):
+            _config['feature_layer'] = str(_config['feature_layer'])
         _config['channel_swap'] = tuple(
             [int(i.strip()) for i in _config['channel_swap'].split(',')])
 
@@ -188,7 +189,7 @@ class MxnetFeatureExtractor(object):
         net.all_layers = net.sym.get_internals()
 
         self.all_layer_names = net.all_layers.list_outputs()
-        print('\n---> all_layer_names:', self.all_layer_names)
+        # print('\n---> all_layer_names:', self.all_layer_names)
         # print('\n---> net.sym[2].get_children():', net.sym[2].get_children())
 
         self.feature_layers = self.get_feature_layers()
